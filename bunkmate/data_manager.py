@@ -211,6 +211,7 @@ def kill_switch():
             if os.path.isfile(f): os.remove(f)
 
 def backup_data(zip_path: str):
+    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
     with zipfile.ZipFile(zip_path, 'w') as zipf:
         if client:
             users = list(users_col.find({}))
