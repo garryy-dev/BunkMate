@@ -1204,22 +1204,33 @@ def main() -> None:
     RENDER = os.environ.get("RENDER", False)
 
     if RENDER:
-        PORT = int(os.environ.get("PORT", "8443"))
-        WEBHOOK_URL = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL")
+        PORT = int(os.environ.get("PORT", 10000))
         
-        if not WEBHOOK_URL:
-            print("Error: RENDER_EXTERNAL_URL or WEBHOOK_URL environment variable is missing for Render deployment!")
-            return
+        # Start a simple HTTP server in a background thread to satisfy Render's port requirement
+        # and to give cron-job.org a 200 OK response to keep the bot awake!
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        
+        class HealthCheckHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"Bot is alive and awake!")
+                
+            def log_message(self, format, *args):
+                pass # Suppress logs to keep terminal clean
+                
+        def run_dummy_server():
+            server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
+            server.serve_forever()
             
-        print(f"Starting Webhook on port {PORT} for URL {WEBHOOK_URL}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            webhook_url=WEBHOOK_URL
-        )
-    else:
-        print("Bot is running in Polling mode... Press Ctrl+C to stop.")
-        application.run_polling()
+        threading.Thread(target=run_dummy_server, daemon=True).start()
+        logging.info(f"Health check server listening on port {PORT}")
+
+    # Use polling for both local and Render. It's much more reliable and avoids webhook errors!
+    print("Bot is running in Polling mode... Press Ctrl+C to stop.")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
