@@ -99,20 +99,20 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sem = d.get("current_semester", "Unknown")
         uname = d.get("tg_username", "None")
         
-        user_list.append(f"`{uid}` | {real_name} | {sem} | @{uname}")
+        user_list.append(f"<code>{uid}</code> | {real_name} | {sem} | @{uname}")
         
         for subj, info in d.get("subjects", {}).items():
             total_subjects += 1
             total_bunks += info.get("absent", 0)
             total_classes += (info.get("present", 0) + info.get("absent", 0))
             
-    msg = f"👑 *ADMIN DASHBOARD* 👑\n\n"
-    msg += f"👥 *Total Users:* {total_users}\n"
-    msg += f"📚 *Total Subjects Tracked:* {total_subjects}\n"
-    msg += f"🛌 *Global Classes Bunked:* {total_bunks} / {total_classes}\n\n"
-    msg += f"📋 *User List (ID | Name | Sem | Username):*\n" + "\n".join(user_list)
+    msg = f"👑 <b>ADMIN DASHBOARD</b> 👑\n\n"
+    msg += f"👥 <b>Total Users:</b> {total_users}\n"
+    msg += f"📚 <b>Total Subjects Tracked:</b> {total_subjects}\n"
+    msg += f"🛌 <b>Global Classes Bunked:</b> {total_bunks} / {total_classes}\n\n"
+    msg += f"📋 <b>User List (ID | Name | Sem | Username):</b>\n" + "\n".join(user_list)
     
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def admin_snoop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
