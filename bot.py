@@ -1355,7 +1355,7 @@ async def lifespan(app: FastAPI):
         else:
             webhook_url = "https://YOUR_WEBHOOK_URL_HERE.com/bunkmate/webhook"
             
-    secret_token = os.environ.get("WEBHOOK_SECRET_TOKEN", "bunkmate_secure_default_123")
+    secret_token = os.environ.get("WEBHOOK_SECRET_TOKEN", "")
     await application.bot.set_webhook(url=webhook_url, secret_token=secret_token)
     logging.info(f"Webhook set to: {webhook_url}")
     
@@ -1381,7 +1381,7 @@ RATE_LIMIT_CACHE = {}
 async def webhook(request: Request):
     # 1. Webhook Spoofing Protection
     secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    expected_secret = os.environ.get("WEBHOOK_SECRET_TOKEN", "bunkmate_secure_default_123")
+    expected_secret = os.environ.get("WEBHOOK_SECRET_TOKEN", "")
     if secret != expected_secret:
         logging.warning("Unauthorized webhook access attempt!")
         return Response(status_code=HTTPStatus.UNAUTHORIZED)
