@@ -74,7 +74,7 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "🛠 *ADMIN CHEAT SHEET* 🛠\n\n"
         "• `/admin` - View the global dashboard and user list.\n"
         "• `/admin_help` - Show this menu.\n"
-        "• `/admin_snoop <id>` - View a specific user's private dashboard.\n"
+        "• `/admin_view_user <id>` - View a specific user's private dashboard.\n"
         "• `/admin_broadcast <msg>` - Send an announcement to EVERY user.\n"
         "• `/undo_broadcast` - Undo the most recent broadcast.\n"
         "• `/admin_message <id> <msg>` - Send a direct message to a specific user.\n"
@@ -121,12 +121,12 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     await update.message.reply_text(msg, parse_mode="HTML")
 
-async def admin_snoop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
     if not is_admin(user_id): return
     
     if not context.args:
-        await update.message.reply_text("Usage: /admin_snoop <user_id>")
+        await update.message.reply_text("Usage: /admin_view_user <user_id>")
         return
         
     target_id = context.args[0]
@@ -136,7 +136,7 @@ async def admin_snoop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
         
     d = load_data(target_id)
-    msg = f"🕵️‍♂️ *Snooping on {d.get('real_name', 'Unknown')}* 🕵️‍♂️\n\n"
+    msg = f"🕵️‍♂️ *Viewing user {d.get('real_name', 'Unknown')}* 🕵️‍♂️\n\n"
     for name, info in d.get("subjects", {}).items():
         p = info["present"]
         a = info["absent"]
@@ -1254,7 +1254,7 @@ application.add_handler(ConversationHandler(
 # Admin commands
 application.add_handler(CommandHandler("admin", admin_dashboard))
 application.add_handler(CommandHandler("admin_help", admin_help))
-application.add_handler(CommandHandler("admin_snoop", admin_snoop))
+application.add_handler(CommandHandler("admin_view_user", admin_view_user))
 application.add_handler(CommandHandler("admin_broadcast", admin_broadcast))
 application.add_handler(CommandHandler("undo_broadcast", undo_broadcast))
 application.add_handler(CommandHandler("admin_message", admin_message))
