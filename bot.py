@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
+from fastapi import FastAPI, Request, Response
+from contextlib import asynccontextmanager
+from http import HTTPStatus
+
 from bunkmate.data_manager import (
     load_data, save_data, get_all_users, delete_user,
     is_banned, ban_user, unban_user, kill_switch, backup_data, DATA_DIR
@@ -72,6 +76,9 @@ async def admin_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "• `/admin_help` - Show this menu.\n"
         "• `/admin_snoop <id>` - View a specific user's private dashboard.\n"
         "• `/admin_broadcast <msg>` - Send an announcement to EVERY user.\n"
+        "• `/undo_broadcast` - Undo the most recent broadcast.\n"
+        "• `/admin_message <id> <msg>` - Send a direct message to a specific user.\n"
+        "• `/undo_message <id>` - Undo the most recent message to a specific user.\n"
         "• `/admin_backup` - Instantly download a zip file of all JSON data.\n"
         "• `/admin_ban <id>` - Permanently delete a user and block them forever.\n"
         "• `/admin_unban <id>` - Remove a user from the ban blacklist.\n"
@@ -142,23 +149,90 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = str(update.effective_user.id)
     if not is_admin(user_id): return
     
-    if not context.args:
+    parts = update.message.text.split(maxsplit=1)
+    if len(parts) < 2:
         await update.message.reply_text("Usage: /admin_broadcast <message>")
         return
         
-    broadcast_msg = " ".join(context.args)
+    broadcast_msg = parts[1]
     users = get_all_users()
     sent = 0
+    context.bot_data["last_broadcast"] = []
+    
     for d in users:
         uid = d.get("user_id")
         if not uid or is_banned(uid): continue
         try:
-            await context.bot.send_message(chat_id=uid, text=f"📢 *ANNOUNCEMENT*\n\n{broadcast_msg}", parse_mode="Markdown")
+            msg = await context.bot.send_message(chat_id=uid, text=f"📢 *ANNOUNCEMENT*\n\n{broadcast_msg}", parse_mode="Markdown")
+            context.bot_data["last_broadcast"].append((uid, msg.message_id))
             sent += 1
         except Exception:
             pass
             
-    await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
+    await update.message.reply_text(f"✅ Broadcast sent to {sent} users. Use /undo_broadcast if you made a mistake.")
+
+async def admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id): return
+    
+    parts = update.message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        await update.message.reply_text("Usage: /admin_message <user_id> <message>")
+        return
+        
+    target_id = parts[1]
+    msg_text = parts[2]
+    
+    try:
+        msg = await context.bot.send_message(chat_id=target_id, text=f"💬 *MESSAGE FROM ADMIN*\n\n{msg_text}", parse_mode="Markdown")
+        if "last_admin_message" not in context.bot_data:
+            context.bot_data["last_admin_message"] = {}
+        context.bot_data["last_admin_message"][target_id] = msg.message_id
+        await update.message.reply_text(f"✅ Message successfully sent to user {target_id}. Use /undo_message {target_id} to undo.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to send message. They might have blocked the bot or the ID is invalid. Error: {e}")
+
+async def undo_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id): return
+    
+    last_bcast = context.bot_data.get("last_broadcast", [])
+    if not last_bcast:
+        await update.message.reply_text("No recent broadcast found to undo.")
+        return
+        
+    deleted = 0
+    for chat_id, msg_id in last_bcast:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            deleted += 1
+        except Exception:
+            pass
+            
+    context.bot_data["last_broadcast"] = []
+    await update.message.reply_text(f"✅ Undid broadcast for {deleted} users.")
+
+async def undo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = str(update.effective_user.id)
+    if not is_admin(user_id): return
+    
+    if not context.args:
+        await update.message.reply_text("Usage: /undo_message <user_id>")
+        return
+        
+    target_id = context.args[0]
+    msg_id = context.bot_data.get("last_admin_message", {}).get(target_id)
+    
+    if not msg_id:
+        await update.message.reply_text(f"No recent admin message found for user {target_id} to undo.")
+        return
+        
+    try:
+        await context.bot.delete_message(chat_id=target_id, message_id=msg_id)
+        del context.bot_data["last_admin_message"][target_id]
+        await update.message.reply_text(f"✅ Undid last message sent to user {target_id}.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to undo message. It might be too old or already deleted. Error: {e}")
 
 async def admin_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = str(update.effective_user.id)
@@ -610,8 +684,62 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         status_map = {"P": "Present", "A": "Absent", "C": "Cancelled"}
         await query.edit_message_text(f"↩️ Undone *{status_map.get(status, status)}* for *{subj_name}*.", parse_mode="Markdown")
 
+    elif data_str == "newsem_cancel":
+        await query.answer()
+        await query.edit_message_text("New semester setup cancelled.")
+    elif data_str == "newsem_confirm":
+        await query.answer()
+        if "archived_semesters" not in data:
+            data["archived_semesters"] = []
+        data["archived_semesters"].append({
+            "date_archived": str(datetime.utcnow()),
+            "subjects": data.get("subjects", {})
+        })
+        data["subjects"] = {}
+        save_data(data, print_msg=False, user_id=user_id)
+        await query.edit_message_text("🎉 *Happy New Semester!* 🎉\n\nYour dashboard has been cleared. Use /add to start adding your new subjects!", parse_mode="Markdown")
+
 
 # --- New Feature Commands ---
+
+# Feature: Predictor
+async def canibunk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await require_onboarding(update): return
+    user_id = str(update.effective_user.id)
+    data = load_data(user_id)
+    target = data.get("target_percentage", 75.0)
+    subjects = data.get("subjects", {})
+    
+    if not subjects:
+        await update.message.reply_text("You haven't added any subjects yet. Use /add to get started!")
+        return
+        
+    msg = f"🔮 *BUNK PREDICTOR* 🔮\n_Target: {target}%_\n\n"
+    for name, info in subjects.items():
+        present = info.get("present", 0)
+        absent = info.get("absent", 0)
+        custom_target = data.get("custom_targets", {}).get(name, target)
+        can_bunk = classes_can_bunk(present, absent, custom_target)
+        emoji = status_emoji(get_attendance_pct(present, absent), custom_target)
+        msg += f"{emoji} *{name}*: You can safely skip *{can_bunk}* consecutive classes.\n"
+        
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# Feature: New Semester
+async def new_semester_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await require_onboarding(update): return
+    keyboard = [
+        [InlineKeyboardButton("✅ YES, START NEW SEMESTER", callback_data="newsem_confirm")],
+        [InlineKeyboardButton("❌ NO, CANCEL", callback_data="newsem_cancel")]
+    ]
+    await update.message.reply_text(
+        "⚠️ *WARNING: NEW SEMESTER* ⚠️\n\n"
+        "This will archive all your current subjects and give you a fresh, clean slate. "
+        "Your old attendance will be saved in the database but removed from your dashboard.\n\n"
+        "Are you sure you want to start a new semester?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
 # Feature 4: /help
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -630,9 +758,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*🎯 Targets & Forecasts*\n"
         "/set\\_target — Change your global target %\n"
         "/target\\_subject — Set a custom target for one subject\n"
-        "/forecast — Set semester end date for projections\n\n"
+        "/forecast — Set semester end date for projections\n"
+        "/canibunk — See how many consecutive classes you can safely skip\n\n"
         "*⚙️ Other*\n"
         "/export — Download your attendance as a CSV file\n"
+        "/new\\_semester — Archive old subjects and start a fresh dashboard\n"
         "/reminder — Toggle daily attendance reminders\n"
         "/help — Show this guide\n"
         "/delete\\_account — Permanently delete your data\n"
@@ -760,7 +890,7 @@ async def reminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = str(update.effective_user.id)
     data = load_data(user_id)
     
-    current = data.get("reminder_enabled", False)
+    current = data.get("reminder_enabled", True)
     data["reminder_enabled"] = not current
     save_data(data, print_msg=False, user_id=user_id)
     
@@ -771,11 +901,14 @@ async def reminder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def send_daily_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Background job that runs daily at 6 PM to remind users."""
+    if datetime.utcnow().weekday() == 6:
+        return # Skip Sundays
+
     users = get_all_users()
     for d in users:
         uid = d.get("user_id")
         if not uid or is_banned(uid): continue
-        if not d.get("reminder_enabled", False): continue
+        if not d.get("reminder_enabled", True): continue
         
         real_name = d.get("real_name", "there")
         try:
@@ -1084,7 +1217,9 @@ async def post_init(application: Application) -> None:
         BotCommand("set_target", "Change target percentage"),
         BotCommand("target_subject", "Set custom target for a subject"),
         BotCommand("forecast", "Set semester end date for a subject"),
+        BotCommand("canibunk", "Predict classes you can skip"),
         BotCommand("reminder", "Toggle daily reminders"),
+        BotCommand("new_semester", "Archive subjects and start fresh"),
         BotCommand("help", "Show all commands"),
         BotCommand("delete_account", "Delete your BunkMate account"),
         BotCommand("cancel", "Cancel current action")
@@ -1092,145 +1227,183 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(commands)
     logging.info("Bot commands menu registered.")
 
-def main() -> None:
-    if not TOKEN or TOKEN == "your_bot_token_here":
-        print("Please set your TELEGRAM_BOT_TOKEN in .env")
-        return
-        
-    try:
-        application = Application.builder().token(TOKEN).post_init(post_init).build()
-        _has_job_queue = True
-    except TypeError:
-        # APScheduler not installed — build without job_queue
-        application = Application.builder().token(TOKEN).post_init(post_init).job_queue(None).build()
-        _has_job_queue = False
-        logging.warning("APScheduler not installed. Daily reminders disabled. Run: pip install python-telegram-bot[job-queue]")
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('start', start_onboarding)],
-        states={
-            ONBOARDING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name_receive)],
-            ONBOARDING_ROLL: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_roll_receive)],
-            ONBOARDING_SEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_sem_receive)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
+# Bot Application Initialization
+if not TOKEN or TOKEN == "your_bot_token_here":
+    print("Please set your TELEGRAM_BOT_TOKEN in .env")
+    TOKEN = "123456789:YOUR_BOT_TOKEN_HERE"
     
-    # Admin commands
-    application.add_handler(CommandHandler("admin", admin_dashboard))
-    application.add_handler(CommandHandler("admin_help", admin_help))
-    application.add_handler(CommandHandler("admin_snoop", admin_snoop))
-    application.add_handler(CommandHandler("admin_broadcast", admin_broadcast))
-    application.add_handler(CommandHandler("admin_backup", admin_backup))
-    application.add_handler(CommandHandler("admin_ban", admin_ban))
-    application.add_handler(CommandHandler("admin_unban", admin_unban))
-    application.add_handler(CommandHandler("admin_delete_user", admin_delete_user))
-    application.add_handler(CommandHandler("admin_kill_switch", admin_kill_switch))
+try:
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    _has_job_queue = True
+except TypeError:
+    # APScheduler not installed — build without job_queue
+    application = Application.builder().token(TOKEN).post_init(post_init).job_queue(None).build()
+    _has_job_queue = False
+    logging.warning("APScheduler not installed. Daily reminders disabled. Run: pip install python-telegram-bot[job-queue]")
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('start', start_onboarding)],
+    states={
+        ONBOARDING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_name_receive)],
+        ONBOARDING_ROLL: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_roll_receive)],
+        ONBOARDING_SEM: [MessageHandler(filters.TEXT & ~filters.COMMAND, onboarding_sem_receive)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+# Admin commands
+application.add_handler(CommandHandler("admin", admin_dashboard))
+application.add_handler(CommandHandler("admin_help", admin_help))
+application.add_handler(CommandHandler("admin_snoop", admin_snoop))
+application.add_handler(CommandHandler("admin_broadcast", admin_broadcast))
+application.add_handler(CommandHandler("undo_broadcast", undo_broadcast))
+application.add_handler(CommandHandler("admin_message", admin_message))
+application.add_handler(CommandHandler("undo_message", undo_message))
+application.add_handler(CommandHandler("admin_backup", admin_backup))
+application.add_handler(CommandHandler("admin_ban", admin_ban))
+application.add_handler(CommandHandler("admin_unban", admin_unban))
+application.add_handler(CommandHandler("admin_delete_user", admin_delete_user))
+application.add_handler(CommandHandler("admin_kill_switch", admin_kill_switch))
+
+# User commands
+application.add_handler(CommandHandler("dashboard", dashboard))
+application.add_handler(CommandHandler("mark", mark_cmd))
+application.add_handler(CommandHandler("history", history_cmd))
+application.add_handler(CommandHandler("remove", remove_cmd))
+application.add_handler(CommandHandler("delete_account", delete_account_cmd))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("stats", stats_cmd))
+application.add_handler(CommandHandler("export", export_cmd))
+application.add_handler(CommandHandler("reminder", reminder_cmd))
+application.add_handler(CommandHandler("canibunk", canibunk_cmd))
+application.add_handler(CommandHandler("new_semester", new_semester_cmd))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('add', add_start)],
+    states={ADDING_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_receive)]},
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('import', import_start)],
+    states={
+        14: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_subj_receive)],
+        IMPORT_PRESENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_present_receive)],
+        IMPORT_ABSENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_absent_receive)],
+        IMPORT_CANCELLED: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_cancelled_receive)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('set_target', target_start)],
+    states={SETTING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_receive)]},
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('target_subject', target_subj_start)],
+    states={
+        12: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_subj_receive)],
+        13: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_subj_pct_receive)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('rename', rename_start)],
+    states={
+        1: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_old_receive)],
+        2: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_new_receive)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(ConversationHandler(
+    entry_points=[CommandHandler('forecast', forecast_start)],
+    states={
+        1: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_subj_receive)],
+        2: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_date_receive)],
+        3: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_per_week_receive)]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_conv)],
+))
+
+application.add_handler(CallbackQueryHandler(button_handler))
+
+# Feature 3: Schedule daily reminder job at 6 PM IST (12:30 PM UTC)
+if _has_job_queue and application.job_queue:
+    from datetime import time as dt_time
+    application.job_queue.run_daily(
+        send_daily_reminders,
+        time=dt_time(hour=12, minute=30, second=0),  # 6:00 PM IST = 12:30 PM UTC
+        name="daily_reminder"
+    )
+    logging.info("Daily reminder job scheduled.")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await application.initialize()
+    await application.start()
     
-    # User commands
-    application.add_handler(CommandHandler("dashboard", dashboard))
-    application.add_handler(CommandHandler("mark", mark_cmd))
-    application.add_handler(CommandHandler("history", history_cmd))
-    application.add_handler(CommandHandler("remove", remove_cmd))
-    application.add_handler(CommandHandler("delete_account", delete_account_cmd))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("stats", stats_cmd))
-    application.add_handler(CommandHandler("export", export_cmd))
-    application.add_handler(CommandHandler("reminder", reminder_cmd))
-    
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('add', add_start)],
-        states={ADDING_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_receive)]},
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-    
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('import', import_start)],
-        states={
-            14: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_subj_receive)],
-            IMPORT_PRESENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_present_receive)],
-            IMPORT_ABSENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_absent_receive)],
-            IMPORT_CANCELLED: [MessageHandler(filters.TEXT & ~filters.COMMAND, import_cancelled_receive)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-    
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('set_target', target_start)],
-        states={SETTING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_receive)]},
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('target_subject', target_subj_start)],
-        states={
-            12: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_subj_receive)],
-            13: [MessageHandler(filters.TEXT & ~filters.COMMAND, target_subj_pct_receive)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('rename', rename_start)],
-        states={
-            1: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_old_receive)],
-            2: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_new_receive)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('forecast', forecast_start)],
-        states={
-            1: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_subj_receive)],
-            2: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_date_receive)],
-            3: [MessageHandler(filters.TEXT & ~filters.COMMAND, forecast_per_week_receive)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_conv)],
-    ))
-    
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Feature 3: Schedule daily reminder job at 6 PM IST (12:30 PM UTC)
-    if _has_job_queue and application.job_queue:
-        from datetime import time as dt_time
-        application.job_queue.run_daily(
-            send_daily_reminders,
-            time=dt_time(hour=12, minute=30, second=0),  # 6:00 PM IST = 12:30 PM UTC
-            name="daily_reminder"
-        )
-        logging.info("Daily reminder job scheduled.")
-
-    RENDER = os.environ.get("RENDER", False)
-
-    if RENDER:
-        PORT = int(os.environ.get("PORT", 10000))
-        
-        # Start a simple HTTP server in a background thread to satisfy Render's port requirement
-        # and to give cron-job.org a 200 OK response to keep the bot awake!
-        import threading
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-        
-        class HealthCheckHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header("Content-type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"Bot is alive and awake!")
-                
-            def log_message(self, format, *args):
-                pass # Suppress logs to keep terminal clean
-                
-        def run_dummy_server():
-            server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
-            server.serve_forever()
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if not webhook_url:
+        render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+        if render_host:
+            webhook_url = f"https://{render_host}/bunkmate/webhook"
+        else:
+            webhook_url = "https://YOUR_WEBHOOK_URL_HERE.com/bunkmate/webhook"
             
-        threading.Thread(target=run_dummy_server, daemon=True).start()
-        logging.info(f"Health check server listening on port {PORT}")
+    secret_token = os.environ.get("WEBHOOK_SECRET_TOKEN", "bunkmate_secure_default_123")
+    await application.bot.set_webhook(url=webhook_url, secret_token=secret_token)
+    logging.info(f"Webhook set to: {webhook_url}")
+    
+    yield
+    
+    # Shutdown
+    await application.stop()
+    await application.shutdown()
 
-    # Use polling for both local and Render. It's much more reliable and avoids webhook errors!
-    print("Bot is running in Polling mode... Press Ctrl+C to stop.")
-    application.run_polling()
+app = FastAPI(lifespan=lifespan)
 
-if __name__ == '__main__':
-    main()
+@app.get("/")
+async def root():
+    return {"status": "alive"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+RATE_LIMIT_CACHE = {}
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    # 1. Webhook Spoofing Protection
+    secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    expected_secret = os.environ.get("WEBHOOK_SECRET_TOKEN", "bunkmate_secure_default_123")
+    if secret != expected_secret:
+        logging.warning("Unauthorized webhook access attempt!")
+        return Response(status_code=HTTPStatus.UNAUTHORIZED)
+
+    req_json = await request.json()
+    update = Update.de_json(req_json, application.bot)
+    
+    # 2. Rate Limiting Protection (5 requests per 5 seconds per user)
+    if update.effective_user:
+        uid = str(update.effective_user.id)
+        now = datetime.utcnow().timestamp()
+        
+        # Clean up cache
+        last_times = [t for t in RATE_LIMIT_CACHE.get(uid, []) if now - t < 5]
+        
+        if len(last_times) >= 5:
+            logging.warning(f"Rate limit exceeded for user {uid}")
+            # Drop request but return OK so Telegram doesn't retry
+            return Response(status_code=HTTPStatus.OK)
+            
+        last_times.append(now)
+        RATE_LIMIT_CACHE[uid] = last_times
+
+    await application.process_update(update)
+    return Response(status_code=HTTPStatus.OK)
