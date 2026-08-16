@@ -72,6 +72,8 @@ def _ensure_integrity(data: dict) -> dict:
             info["cancelled"] = 0
         if "history" not in info:
             info["history"] = []
+        elif len(info["history"]) > 100:
+            info["history"] = info["history"][-100:]
     return data
 
 def load_data(user_id: str) -> dict:
